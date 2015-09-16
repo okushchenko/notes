@@ -1,9 +1,16 @@
 My personal sysadmin/devops notes and code snippets.
 
+Other usefull files
+===================
+
+* [Reading List](reading_list.md)  
+* [Performance Tests](performance_tests.md)
+
 Table of content
 ================
 
-1. [Openstack](#openstack)  
+1. [Openstack](#openstack)
+2. [CentOS](#centos)
 2. [Linux](#linux)  
 3. [Spark](#spark)  
 4. [bash](#bash)  
@@ -21,6 +28,7 @@ Table of content
 16. [Mesos](#mesos)  
 17. [Utils](#utils)  
 18. [AWS](#aws)
+19. [Temporary](#temp)
 
 
 Openstack
@@ -94,8 +102,122 @@ ovs-vsctl list-ports <bridge_name>
 > Every node needs up to 3 interfaces, public, internal, and one for ceph traphic. Public is needed on network and probably storage nodes.  
 > OVS br-ex port must be public - think about creating some solution to this problem!  
 
+Centos
+======
+
+##### Add epel repo to Centos 7
+sudo yum install epel-release 
+
+##### Fixing SELinux problems for some application e.g. nginx
+```sh
+sudo yum install policycoreutils-python-2.2.5-11.el7.x86_64
+seallow () {
+  sudo cat /var/log/audit/audit.log | grep $1 | grep denied | audit2allow -M my${1}
+  sudo semodule -i my${1}.pp
+}
+seallow rabbit
+```
+
+#####
+
+```
+sudo cat /var/log/audit/audit.log | grep nginx | grep denied | audit2allow -M mynginx2
+sudo semodule -i mynginx2.pp
+```
+
+##### Bash scripts and function for creating .pp module from .te file
+```sh
+checkmodule -M -m -o postfixlocal.mod postfixlocal.te
+semodule_package -o postfixlocal.pp -m postfixlocal.mod
+semodule -i postfixlocal.pp 
+```
+```
+createpp () {
+  checkmodule -M -m -o ${1}.mod ${1}.te
+  semodule_package -o ${1}.pp -m ${1}.mod
+  semodule -i ${1}.pp
+}
+```
+
+##### SELinux for rabbitmq
+```
+module rabbit-sensu 1.0;
+
+require {
+        type initrc_var_run_t;
+        type unreserved_port_t;
+        type rabbitmq_beam_t;
+        class tcp_socket name_bind;
+        class file { read getattr };
+}
+
+#============= rabbitmq_beam_t ==============
+allow rabbitmq_beam_t initrc_var_run_t:file { read getattr };
+
+#!!!! This avc can be allowed using the boolean 'nis_enabled'
+allow rabbitmq_beam_t unreserved_port_t:tcp_socket name_bind;
+```
+
+##### SELinux for nginx uchiwa+api proxy
+```
+module nginx-sensu 1.0;
+
+require {
+        type var_run_t;
+        type ntop_port_t;
+        type tram_port_t;
+        type httpd_t;
+        type unreserved_port_t;
+        class process setrlimit;
+        class tcp_socket { name_bind name_connect };
+        class file { read write };
+}
+
+#============= httpd_t ==============
+
+#!!!! This avc can be allowed using the boolean 'httpd_can_network_connect'
+allow httpd_t ntop_port_t:tcp_socket name_connect;
+allow httpd_t tram_port_t:tcp_socket name_connect;
+
+#!!!! This avc can be allowed using the boolean 'httpd_setrlimit'
+allow httpd_t self:process setrlimit;
+allow httpd_t var_run_t:file { read write };
+
+#!!!! This avc can be allowed using the boolean 'nis_enabled'
+allow httpd_t unreserved_port_t:tcp_socket name_bind;
+```
+
 Linux
 =====
+
+##### Connect ot serial port with 9600 baudrate 
+1. minicom
+  ```sh
+  minicom -D /dev/ttyS0 -b 9600
+  ```
+2. screen
+  ```sh
+  screen /dev/ttyS0 9600,cs8
+  ```
+3. python
+  ```sh
+  screen /dev/ttyS0 9600
+  ```
+
+##### `-r` flag in `sed` to use extended regular expressions (`+` for example)
+```sh
+sed -r
+```
+
+##### Append after match
+```sh
+cat File | sed -r '/[a-zA-Z]*/ a\1'
+```
+
+#### Prepend before match
+```sh
+cat File | sed -r '/[a-zA-Z]*/ i\1'
+```
 
 ##### Get ip address via wich you can reach internet
 ```sh
@@ -404,18 +526,18 @@ echo 1 > /proc/sys/net/ipv4/conf/eth0/forwarding
 ```
 
 ##### Messing around with port forwarding for squid using iptables
-1.
+1. Accept
 
   ```sh
   iptables -t nat -A PREROUTING -p tcp --dport 8443 -j ACCEPT
   iptables -t nat -A PREROUTING -p tcp --dport 8443 -j REDIRECT --to-port 500
   ```
-2.
+2. Accept + redirect
 
   ```sh
   iptables -A PREROUTING -t nat -p tcp --dport 8443 -j REDIRECT --to-port 500
   ```
-3.
+3. proxy
 
   ```sh
   gid=`id -g proxy`
@@ -1456,4 +1578,291 @@ z = Zookeeper.new("#{`cat /etc/mesos/zk`}")
 zdata = Hash.new{ |h,k| h[k] = Hash.new(&h.default_proc) }
 data = z.get(:path => zdata['master'])[:data]
 puts data
+```
+
+Jenkins
+=======
+
+##### Fix require tty error
+```
+visudo
+# add the following lines. ALL=(ALL) NOPASSWD: ALL
+# Comment this line "Defaults requiretty"
+```
+
+##### Give process ability to survive after build is complete
+```sh
+if [[ $(ps aux | grep node | grep -v grep) == *node* ]]
+  then killall node
+fi
+/usr/local/sbin/daemonize -E BUILD_ID=dontKillMe -E PORT=8000 -o ./api.log -e ./api.err -c ./ /usr/bin/node express
+```
+
+Networking
+==========
+
+##### SRV DNS records are ultimately cool, but they are not supported by any of modern browsers (there is a feature request on mozilla bugtracker which date from 1999 so there is a very little of hope). They can be used for loadbalancing and port mapping.
+```
+_sip._tcp.example.com. 86400 IN SRV 0 5 5060 sipserver.example.com.
+```
+
+##### Curl give `no route to host` - check iptables(firewalld) rules and add custom like
+```
+# Squid proxy firewall rule
+firewall-cmd --zone=public --add-port=3128/tcp --permanent
+# Node express firewall rule
+firewall-cmd --zone=public --add-port=3030/tcp --permanent
+firewall-cmd --reload 
+```
+
+TEMP
+====
+
+##### Full text search using grep
+```sh
+grep -rl "string" /path
+```
+
+##### Add box to vagrant
+```
+vagrant box add trusty https://cloud-images.ubuntu.com/vagrant/trusty/trusty-server-cloudimg-amd64-juju-vagrant-disk1.box
+```
+
+##### Easy to use cpu benchmark
+```
+openssl speed sha1
+```
+
+##### Create new Postgresql user (-E --encrypted -P --pwprompt)
+```
+createuser -E -P graphite
+```
+
+##### Create new Postgresql database (-O --owner) 
+```
+createdb -O graphite graphite
+```
+
+##### Add user to group
+```
+sudo usermod -a -G groupName userName
+sudo adduser userName groupName
+```
+
+##### Hex dump of file
+```
+xxd fileName
+```
+
+##### [Nginx ssl configuration generator](https://mozilla.github.io/server-side-tls/ssl-config-generator/)
+
+##### Test responses to fake urls
+```
+curl -L --resolve fake.url.com:80:$(dig +short url.com | tail -n 1) http://fake.url.com -v
+```
+
+##### To keep env variables while doing sudo use `sudo visudo` and add the following
+```
+Defaults env_keep += "http_proxy SOMEOTHERVARIABLES ANOTHERVARIABLE ETC"
+```
+
+##### iotop can be run in batch mode instead of the default interactive mode using the -b option. -o is used to show only processes actually doing I/O, and -qqq is to suppress column names and I/O summary. See man iotop for more options.
+```
+iotop -boqqq
+```
+
+##### Using conditionals (if statement) inside of ansible playbook
+```yaml
+- name: Write swapfile
+  command: |
+    {% if swapfile_use_dd %}
+    dd if=/dev/zero of={{ swapfile_location }} bs=1M count={{ swapfile_size }} creates={{ swapfile_location }}
+    {% else %}
+    fallocate -l {{ swapfile_size }} {{ swapfile_location }} creates={{ swapfile_location }}
+    {% endif %}
+  register: write_swapfile
+  when: swapfile_size != false
+```
+
+
+##### [Logstash docs](http://logstash.net/docs/1.4.2/)
+
+### List of nice ansible playbooks
+* [logstash](https://github.com/valentinogagliardi/ansible-logstash)
+* [sensu jonhadfield's fork](https://github.com/jonhadfield/ansible-playbook-sensu/commits/master)
+* [sensu my fork](https://github.com/alexgear/ansible-playbook-sensu/tree/develop)
+* [rabbit my fork](https://github.com/alexgear/ansible-playbook-sensu/tree/develop)
+* [make it possible to add custom props for sensu client](https://github.com/psviderski/ansible-playbook-sensu/commit/3b6ba59959d9d102c05073c0891bc0a49bb951b1)
+* [supervisord](https://github.com/zenoamaro/ansible-supervisord)
+
+##### Loop over a dict in jinja2
+```
+dict.items()
+dict.keys()
+dict.values()
+```
+
+##### Using journalctl
+```
+journalctl --dmesg
+journalctl --output=json-pretty UNIT=firewalld.service
+```
+
+##### Efficient mount options
+```
+mount -o rw,noexec,nodev,noatime,nodiratime,nobarrier
+```
+
+##### Use noop (kinda FIFO) scheduler on SSD disks
+```
+sudo echo noop > /sys/block/<device-name>/queue/scheduler
+```
+
+##### Ultra low latency ping
+```
+ping 10.1.7.218 -i0.000005 -c50000 -s 16
+```
+
+##### merge old with new whisper db
+```sh
+sudo find * -type f -exec whisper-fill.py {} ../graphite_novalocal-a/{} \;
+sudo find * -type f -exec rm {} \;
+```
+
+##### Network statistics
+```
+netstat -s
+```
+
+##### Validate certificate SSL
+```
+openssl ocsp -issuer Symantec_Class_3_EV_SSL_CA_G3.crt -CAfile root_plus_intermediates.pem -nonce -cert cert.pem -url http://ocsp.verisign.com
+```
+
+##### Test SSL connection for OSCP and other
+```
+echo QUIT | openssl s_client -connect example.com:443 -status 2> /dev/null
+```
+
+##### To test bandwith and latency via tcp - run
+```sh
+# On fisrt host
+qperf
+# On second host
+qperf $IP1 tcp_bw tcp_lat
+```
+
+##### To fix bad blocks
+```sh
+sudo badblocks -nsv /dev/sda > bad-blocks
+fsck -t ext4 -l /tmp/bad-blocks /dev/sda
+# If /dev/sda is a system volume
+/sbin/shutdown -r -F now
+```
+
+##### Create disk partition using parted
+```
+parted /dev/sdc mklabel msdos
+parted /dev/sdc mkpart primary ext4 1 100%
+parted print free
+parted rm 1
+```
+
+##### Calculate number of Placement Groups in ceph cluster
+```sh
+for i in 0 1 2 3; do echo  "osd.$i=$(sudo ceph pg dump 2>/dev/null | grep '^3.' | awk '{print $15;}' | grep $i | wc -l) pgs"; done
+```
+
+##### Inject config in running ceph cluster
+```sh
+ceph tell osd.* injectargs '--rbd_cache_max_dirty_age = 1'
+```
+
+##### Inspect running config of ceph cluster via admin socket
+```sh
+ceph --admin-daemon /var/run/ceph/ceph-osd.0.asok config show | grep 'rbd_cache_max_dirty_age ='
+```
+
+##### Delete a user
+```
+azure vm extension set $VMNAME VMAccessForLinux Microsoft.OSTCExtensions '1.*' -i '{"remove_user": "usernametoremove"}'
+```
+
+##### Reset the SSH key (Create new user with the SSH key)
+```
+azure vm extension set $VMNAME VMAccessForLinux Microsoft.OSTCExtensions '1.*' -i '{"username": "currentusername", "ssh_key": "contentofsshkey"}'
+```
+
+##### Reset the SSH configuration
+```
+azure vm extension set $VMNAME VMAccessForLinux Microsoft.OSTCExtensions '1.*' -i '{"reset_ssh": "True"}'
+```
+
+##### Change ceph journal to tmpfs
+```
+OSD_ID=1
+service ceph stop osd
+sed -i 's/^#*\s*#*journal dio = false/        journal dio = false/' /etc/ceph/ceph.conf
+ceph-osd --flush-journal -i ${OSD_ID}
+rm -r /var/lib/ceph/ceph-${OSD_ID}
+mount -t tmpfs -o size=1G,nr_inodes=1k,mode=0700 tmpfs /var/lib/ceph/journal/
+mkdir /var/lib/ceph/journal/ceph-${OSD_ID}
+ceph-osd --mkjournal -i ${OSD_ID}
+service ceph start osd
+```
+
+##### HTTP Apache benchmark
+```
+ab -n 1000 -c 100 http://testserver/
+```
+
+##### Mount volumes in openstack using this options to prevent ceph going crazy
+```
+sudo umount /dev/vdc1
+sudo mkfs.xfs /dev/vdc1 -f
+sudo mount -o rw,relatime,seclabel,attr2,inode64,noquota /dev/vdc1 /opt/carbon/storage/whisper/
+```
+
+##### Port forwarding
+```
+echo '1' | sudo tee /proc/sys/net/ipv4/conf/eth0/forwarding
+iptables -t nat -A PREROUTING -p tcp -i ppp0 --dport 8001 -j DNAT --to-destination 192.168.1.200:8080
+iptables -A FORWARD -p tcp -d 192.168.1.200 --dport 8080 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+```
+
+##### Utility to performance test graphite
+```
+~/repos/velux-deploy/graphite_perf_test_go -host=10.3.2.8:5000 -proto=tcp -threads=4 -simul 240 -connections=240 -points 1000
+~/repos/velux-deploy/graphite_perf_test_go -host=10.3.2.8:5000 -proto=tcp -threads=4 -simul 1 -connections=1 -points 100000
+java -jar ~/repos/graphite-stresser/dist/stresser.jar 10.3.2.8 2203 12 128 1 false
+```
+
+##### Easy to use disk stats
+```
+iostat -c 1 2 /dev/sda1
+ioping -c 10 .
+```
+
+##### Tweaking kernel and mount options to maximize xfs performance
+```sh
+sudo mkfs.xfs -f -n size=64k -l size=64m -d agcount=45 /dev/vdb
+mount -o remount,nobarrier,logbufs=8,logbsize=256k,allocsize=2M,noatime,nodiratime,delaylog
+```
+
+```sh
+sudo sysctl vm.dirty_background_ratio=0 vm.dirty_background_bytes=209715200 vm.dirty_ratio=40 vm.dirty_bytes=0 vm.dirty_writeback_centisecs=100 vm.dirty_expire_centisecs=200
+```
+
+```
+[new]
+vm.dirty_background_ratio = 10 -> 0
+vm.dirty_background_bytes = 0 -> 209715200 # 200 MBytes
+vm.dirty_ratio = 20 -> 40
+vm.dirty_bytes = 0 -> 0
+vm.dirty_writeback_centisecs = 500 -> 100
+vm.dirty_expire_centisecs = 3000 -> 200
+```
+
+```sh
+echo 2 > /sys/block/sdb/queue/rq_affinity; echo cfq > /sys/block/xvdb/queue/scheduler; echo 256 > /sys/block/xvdb/queue/nr_requests; echo 256 > /sys/block/xvdb/queue/read_ahead_kb
 ```
